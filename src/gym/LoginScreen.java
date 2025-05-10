@@ -75,7 +75,10 @@ public class LoginScreen extends javax.swing.JFrame {
 
         btn_register.addActionListener(new ActionListener() {
             public void actionPerformed(ActionEvent e) {
-                JOptionPane.showMessageDialog(null, "Redirection vers la page d'inscription client.");
+                dispose();
+                Inscription in = new Inscription();
+               in.setVisible(true);
+               in.setLocationRelativeTo(null);
                 // new RegisterScreen().setVisible(true); // si tu veux ajouter une vraie classe
                 // dispose();
             }
