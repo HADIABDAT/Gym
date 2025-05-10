@@ -5,7 +5,16 @@
 package gym;
 
 import javax.swing.JOptionPane;
-
+import java.sql.*;
+import java.sql.Date; // For java.sql.Date
+import java.time.LocalDate; // For date calculations
+import java.time.LocalTime;
+import java.time.format.DateTimeFormatter; // For formatting dates for display
+import java.time.format.DateTimeParseException;
+import java.time.format.ResolverStyle;
+import java.util.logging.Level;
+import java.util.logging.Logger;
+import javax.swing.table.DefaultTableModel;
 /**
  *
  * @author Chen Zen
@@ -15,9 +24,477 @@ public class AcceuilClient extends javax.swing.JFrame {
     /**
      * Creates new form AcceuilClient
      */
+    
+     private String clientEmail; // To store the logged-in client's email
+      private int clientId; // To store the logged-in client's ID
+       private int clientSolde; // Changed to int
+      
+      // To store details of the currently displayed active subscription for easier renewal
+    private static class ActiveSubscriptionDetails {
+        String type;
+        int prix;
+        int originalDurationDays; // e.g., 7 for hebdomadaire, 30 for mensuel, 365 for annuel
+
+        ActiveSubscriptionDetails(String type, int prix, int originalDurationDays) {
+            this.type = type;
+            this.prix = prix;
+            this.originalDurationDays = originalDurationDays;
+        }
+    }
+    private ActiveSubscriptionDetails currentActiveSubDetails = null;
+
+     
+        public AcceuilClient(String clientEmail) throws SQLException {
+        this.clientEmail = clientEmail;
+        initComponents();
+        setTitle("Accueil Client - " + clientEmail); // Set a more informative title
+        setLocationRelativeTo(null); // Center the window
+        try {
+            loadClientDataAndSubscription(); 
+            loadPaymentHistory(); // Call it here
+        } catch (SQLException ex) { /* ... error handling ... */ }
+         
+    }
+        
     public AcceuilClient() {
         initComponents();
+        System.out.println("AcceuilClient default constructor called - clientEmail will be null. Data loading will be skipped.");
+        // Initially disable renew button as no subscription is loaded
+        jButton3.setEnabled(false); 
+        clearAbonnementActuelLabels(); // Clear labels if default constructor is used
+        this.clientSolde = 0; // Initialize solde for default constructor
     }
+    
+     private void loadClientDataAndSubscription() throws SQLException {
+        if (this.clientEmail == null || this.clientEmail.isEmpty()) {
+            System.err.println("Client email not provided. Cannot load data.");
+            // Clear profile fields
+            jTextField1.setText("");
+            jTextField2.setText("");
+            jTextField3.setText("");
+            jTextField4.setText("");
+            jTextField5.setText("");
+            jTextField6.setText("");
+            jComboBox3.setSelectedIndex(0);
+            // Clear subscription fields and disable renew
+            clearAbonnementActuelLabels();
+            jButton3.setEnabled(false);
+            return;
+        }
+
+        Connection conn = null;
+        PreparedStatement pstmtClient = null;
+        ResultSet rsClient = null;
+
+        try {
+            conn = DriverManager.getConnection("jdbc:mysql://localhost:3306/gym", "root", "votre_nouveau_mot_de_passe");
+            
+            // 1. Load Client Data and get client_id
+            String sqlClient = "SELECT id, Nom, Prenom, Adresse, `date de naissance`, Email, `Mot de passe`, sexe , solde FROM client WHERE Email = ?";
+            pstmtClient = conn.prepareStatement(sqlClient);
+            pstmtClient.setString(1, this.clientEmail);
+            rsClient = pstmtClient.executeQuery();
+
+            if (rsClient.next()) {
+                this.clientId = rsClient.getInt("id"); // Store client ID
+                this.clientSolde = rsClient.getInt("solde"); // Load solde as int
+                // rsClient.getInt() returns 0 if the SQL value is NULL, which is acceptable for solde.
+                jTextField1.setText(rsClient.getString("Nom"));
+                jTextField2.setText(rsClient.getString("Prenom"));
+                jTextField3.setText(rsClient.getString("Adresse"));
+                jTextField4.setText(rsClient.getString("date de naissance")); // Column name from your schema
+                jTextField5.setText(rsClient.getString("Email"));
+                jTextField6.setText(rsClient.getString("Mot de passe"));
+                
+                String sexe = rsClient.getString("sexe"); // Column name from your schema
+                if ("Male".equalsIgnoreCase(sexe) || "Homme".equalsIgnoreCase(sexe)) {
+                    jComboBox3.setSelectedItem("Male");
+                } else if ("Female".equalsIgnoreCase(sexe) || "Femme".equalsIgnoreCase(sexe)) {
+                    jComboBox3.setSelectedItem("Female");
+                } else {
+                    jComboBox3.setSelectedIndex(0); 
+                }
+                
+                // 2. Now load subscription data using this.clientId
+                loadAbonnementData(conn);
+                  jLabel41.setText(String.valueOf(this.clientSolde) + " DA");
+
+            } else {
+                JOptionPane.showMessageDialog(this, "Client non trouvé.", "Erreur", JOptionPane.ERROR_MESSAGE);
+                clearAbonnementActuelLabels();
+                jButton3.setEnabled(false);
+            }
+        } catch (SQLException e) {
+            JOptionPane.showMessageDialog(this, "Erreur DB (Client): " + e.getMessage(), "Erreur SQL", JOptionPane.ERROR_MESSAGE);
+            e.printStackTrace();
+            clearAbonnementActuelLabels();
+            jButton3.setEnabled(false);
+        } finally {
+            
+            // The connection will be closed by loadAbonnementData if it was passed and used
+        }
+    }
+      private void clearAbonnementActuelLabels() {
+        jLabel15.setText(""); // Type
+        jLabel17.setText(""); // Date du debut
+        jLabel19.setText(""); // Date du fin
+        jLabel36.setText(""); // Prix
+        jLabel21.setText(""); // Status
+    }
+
+    private void loadAbonnementData(Connection connPassed) {
+        // This method assumes clientId is already set.
+        if (this.clientId == 0) {
+            System.err.println("Client ID not set. Cannot load subscription data.");
+            clearAbonnementActuelLabels();
+            jButton3.setEnabled(false);
+            return;
+        }
+
+        Connection conn = connPassed;
+        boolean newConnectionOpened = false;
+        PreparedStatement pstmtSub = null;
+        ResultSet rsSub = null;
+        currentActiveSubDetails = null; // Reset
+        DateTimeFormatter dbDateFormatter = DateTimeFormatter.ISO_LOCAL_DATE; // Dates in DB are YYYY-MM-DD
+        DateTimeFormatter displayDateFormatter = DateTimeFormatter.ofPattern("dd/MM/yyyy");
+
+
+        try {
+            if (conn == null || conn.isClosed()) {
+                conn = DriverManager.getConnection("jdbc:mysql://localhost:3306/gym", "root", "votre_nouveau_mot_de_passe");
+                newConnectionOpened = true;
+            }
+
+            String sqlSub = "SELECT type, `Date de debut`, `Date du fin`, Prix, Status FROM abonnement " +
+                            "WHERE client_id = ? AND Status = 'actif' " +
+                            "ORDER BY `Date du fin` DESC, `Date de debut` DESC LIMIT 1";
+            pstmtSub = conn.prepareStatement(sqlSub);
+            pstmtSub.setInt(1, this.clientId);
+            rsSub = pstmtSub.executeQuery();
+
+            if (rsSub.next()) {
+                String type = rsSub.getString("type");
+                Date dateDebutSQL = rsSub.getDate("Date de debut");
+                Date dateFinSQL = rsSub.getDate("Date du fin");
+                int prix = rsSub.getInt("Prix");
+                String status = rsSub.getString("Status");
+
+                jLabel15.setText(type);
+                jLabel17.setText(dateDebutSQL != null ? dateDebutSQL.toLocalDate().format(displayDateFormatter) : "");
+                jLabel19.setText(dateFinSQL != null ? dateFinSQL.toLocalDate().format(displayDateFormatter) : "");
+                jLabel36.setText(String.valueOf(prix) + " DA");
+                jLabel21.setText(status);
+                jButton3.setEnabled(true); // Enable renew button
+
+                int duration = 0;
+                if ("hebdomadaire".equalsIgnoreCase(type)) duration = 7;
+                else if ("mensuel".equalsIgnoreCase(type)) duration = 30;
+                else if ("annuel".equalsIgnoreCase(type)) duration = 365;
+                currentActiveSubDetails = new ActiveSubscriptionDetails(type, prix, duration);
+
+            } else {
+                clearAbonnementActuelLabels();
+                jLabel15.setText("Aucun abonnement actif");
+                jButton3.setEnabled(false); // Disable renew if no active subscription
+            }
+        } catch (SQLException e) {
+            JOptionPane.showMessageDialog(this, "Erreur DB (Abonnement): " + e.getMessage(), "Erreur SQL", JOptionPane.ERROR_MESSAGE);
+            e.printStackTrace();
+            clearAbonnementActuelLabels();
+            jButton3.setEnabled(false);
+        } finally {
+            try { if (rsSub != null) rsSub.close(); } catch (SQLException e) { e.printStackTrace(); }
+            try { if (pstmtSub != null) pstmtSub.close(); } catch (SQLException e) { e.printStackTrace(); }
+            if (newConnectionOpened && conn != null) { // Only close if this method opened it
+                try { conn.close(); } catch (SQLException e) { e.printStackTrace(); }
+            } else if (connPassed != null && conn == null) { // If connPassed was used but became null somehow (e.g. closed externally)
+                // This case is less likely if connPassed is managed correctly by caller
+            }
+            // If connPassed was provided and used, the caller (loadClientDataAndSubscription) should close it if it opened it.
+            // For simplicity now, if loadClientDataAndSubscription opens it, it closes it. If loadAbonnementData needs one, it opens/closes its own.
+            // Let's refine: loadClientDataAndSubscription will manage its connection. loadAbonnementData will take the open conn.
+        }
+    }
+    
+    // Call this method from loadClientData after getting client ID and its own DB operations are done.
+    private void loadAbonnementData() {
+        Connection conn = null;
+        try {
+            conn = DriverManager.getConnection("jdbc:mysql://localhost:3306/gym", "root", "votre_nouveau_mot_de_passe");
+            loadAbonnementData(conn); // Call the version that takes a connection
+        } catch (SQLException e) {
+             JOptionPane.showMessageDialog(this, "Erreur de connexion pour charger abonnement: " + e.getMessage(), "Erreur SQL", JOptionPane.ERROR_MESSAGE);
+        } finally {
+            if (conn != null) try { conn.close(); } catch (SQLException ex) { ex.printStackTrace(); }
+        }
+    }
+
+private void inscrireAbonnement(String typeAbonnement, int prixAbonnement, int dureeEnJours) {
+    if (this.clientId == 0) {
+        JOptionPane.showMessageDialog(this, "Erreur: ID Client non disponible.", "Erreur", JOptionPane.ERROR_MESSAGE);
+        return;
+    }
+
+    if (this.clientSolde < prixAbonnement) {
+        JOptionPane.showMessageDialog(this,
+                "Solde insuffisant (" + this.clientSolde + " DA). " +
+                "Le prix de l'abonnement est de " + prixAbonnement + " DA.",
+                "Solde Insuffisant", JOptionPane.WARNING_MESSAGE);
+        return;
+    }
+
+    int newSoldeCalculated = this.clientSolde - prixAbonnement;
+    // The confirmation dialog for subscription is already handled by the calling button action (jButton3, jButton4, etc.)
+    // So, we can proceed directly if this method is called.
+    // However, for direct calls from jButton4, jButton5, jButton6, the confirmation is still good.
+    // For consistency, let's keep a confirmation here or ensure it's always done before calling.
+    // The previous version of jButton3 did the confirm THEN called this. That's fine.
+    // Let's assume confirmation for the specific action (new sub or renewal) has happened.
+
+    Connection conn = null;
+    PreparedStatement pstmtUpdateOldSub = null;
+    PreparedStatement pstmtInsertNewSub = null;
+    PreparedStatement pstmtUpdateSolde = null;
+    PreparedStatement pstmtInsertPayment = null; // For the paiment table
+
+    try {
+        conn = DriverManager.getConnection("jdbc:mysql://localhost:3306/gym", "root", "votre_nouveau_mot_de_passe");
+        conn.setAutoCommit(false); // Start transaction
+
+        // 1. Deactivate any existing active subscription for this client
+        String sqlUpdateOld = "UPDATE abonnement SET Status = 'pas actif' WHERE client_id = ? AND Status = 'actif'";
+        pstmtUpdateOldSub = conn.prepareStatement(sqlUpdateOld);
+        pstmtUpdateOldSub.setInt(1, this.clientId);
+        pstmtUpdateOldSub.executeUpdate();
+
+        // 2. Insert the new subscription
+        LocalDate dateDebut = LocalDate.now();
+        LocalDate dateFin = dateDebut.plusDays(dureeEnJours);
+        String sqlInsertNew = "INSERT INTO abonnement (client_id, type, `Date de debut`, `Date du fin`, Prix, Status) " +
+                              "VALUES (?, ?, ?, ?, ?, 'actif')";
+        pstmtInsertNewSub = conn.prepareStatement(sqlInsertNew);
+        pstmtInsertNewSub.setInt(1, this.clientId);
+        pstmtInsertNewSub.setString(2, typeAbonnement);
+        pstmtInsertNewSub.setDate(3, java.sql.Date.valueOf(dateDebut)); // Use java.sql.Date
+        pstmtInsertNewSub.setDate(4, java.sql.Date.valueOf(dateFin));   // Use java.sql.Date
+        pstmtInsertNewSub.setInt(5, prixAbonnement);
+        pstmtInsertNewSub.executeUpdate();
+
+        // 3. Update client's solde
+        String sqlUpdateClientSolde = "UPDATE client SET solde = ? WHERE id = ?";
+        pstmtUpdateSolde = conn.prepareStatement(sqlUpdateClientSolde);
+        pstmtUpdateSolde.setInt(1, newSoldeCalculated);
+        pstmtUpdateSolde.setInt(2, this.clientId);
+        pstmtUpdateSolde.executeUpdate();
+
+        // 4. Insert into paiment table
+       
+       // Get current date and time
+       java.sql.Timestamp paymentDateTime = new java.sql.Timestamp(System.currentTimeMillis());
+
+
+        String sqlInsertPaiment = "INSERT INTO paiment (Client, montant, date , heure) VALUES (?, ?, ? , ?)";
+        pstmtInsertPayment = conn.prepareStatement(sqlInsertPaiment);
+        pstmtInsertPayment.setInt(1, this.clientId);
+        pstmtInsertPayment.setInt(2, prixAbonnement); // The amount paid for the subscription
+        
+// Option 1: Store date and time in separate fields
+java.sql.Date paymentDate = new java.sql.Date(paymentDateTime.getTime());
+java.sql.Time paymentTime = new java.sql.Time(paymentDateTime.getTime());
+pstmtInsertPayment.setDate(3, paymentDate);
+pstmtInsertPayment.setTime(4, paymentTime);
+        pstmtInsertPayment.executeUpdate();
+
+        conn.commit(); // Commit transaction (includes all 4 operations now)
+
+        JOptionPane.showMessageDialog(this, "Abonnement " + typeAbonnement + " enregistré et paiement enregistré avec succès!\nNouveau solde: " + newSoldeCalculated + " DA.", "Succès", JOptionPane.INFORMATION_MESSAGE);
+
+        this.clientSolde = newSoldeCalculated; // Update local clientSolde
+        jLabel41.setText(String.valueOf(this.clientSolde) + " DA"); // Update solde display
+
+        // Refresh all relevant data after successful operation
+        loadClientDataAndSubscription(); // This will also call loadAbonnementData
+
+    } catch (SQLException e) {
+        if (conn != null) {
+            try {
+                conn.rollback(); // Rollback on error
+                JOptionPane.showMessageDialog(this, "Transaction annulée en raison d'une erreur.", "Erreur de Transaction", JOptionPane.ERROR_MESSAGE);
+            } catch (SQLException ex) {
+                Logger.getLogger(AcceuilClient.class.getName()).log(Level.SEVERE, "Erreur lors du rollback de la transaction", ex);
+            }
+        }
+        JOptionPane.showMessageDialog(this, "Erreur lors de l'inscription à l'abonnement/paiement: " + e.getMessage(), "Erreur SQL", JOptionPane.ERROR_MESSAGE);
+        Logger.getLogger(AcceuilClient.class.getName()).log(Level.SEVERE, "Error in inscrireAbonnement", e);
+    } finally {
+        try { if (pstmtUpdateOldSub != null) pstmtUpdateOldSub.close(); } catch (SQLException e) { e.printStackTrace(); }
+        try { if (pstmtInsertNewSub != null) pstmtInsertNewSub.close(); } catch (SQLException e) { e.printStackTrace(); }
+        try { if (pstmtUpdateSolde != null) pstmtUpdateSolde.close(); } catch (SQLException e) { e.printStackTrace(); }
+        try { if (pstmtInsertPayment != null) pstmtInsertPayment.close(); } catch (SQLException e) { e.printStackTrace(); } // Close the new PreparedStatement
+        if (conn != null) {
+            try {
+                conn.setAutoCommit(true); // Reset auto-commit state
+                conn.close();
+            } catch (SQLException e) {
+                e.printStackTrace();
+            }
+        }
+    }
+}
+
+
+     private void loadClientData() {
+        if (this.clientEmail == null || this.clientEmail.isEmpty()) {
+            //JOptionPane.showMessageDialog(this, "Email du client non fourni.", "Erreur", JOptionPane.ERROR_MESSAGE);
+            System.err.println("Client email not provided to AcceuilClient. Cannot load data.");
+            // Optionally disable fields or show a message in the UI
+            jTextField1.setText("");
+            jTextField2.setText("");
+            jTextField3.setText("");
+            jTextField4.setText("");
+            jTextField5.setText("");
+            jTextField6.setText(""); // Clear password field
+            jComboBox3.setSelectedIndex(0);
+            // You might want to disable the "Enregister" button as well
+            // jButton2.setEnabled(false);
+            return;
+        }
+
+        Connection conn = null;
+        PreparedStatement pstmt = null;
+        ResultSet rs = null;
+
+        try {
+            // Replace with your actual database connection details
+            conn = DriverManager.getConnection("jdbc:mysql://localhost:3306/gym", "root", "votre_nouveau_mot_de_passe");
+            String sql = "SELECT Nom, Prenom, Adresse, `Date De Naissance`, Email, `Mot de passe`, Sexe FROM client WHERE Email = ?";
+            pstmt = conn.prepareStatement(sql);
+            pstmt.setString(1, this.clientEmail);
+            rs = pstmt.executeQuery();
+
+            if (rs.next()) {
+                jTextField1.setText(rs.getString("Nom"));
+                jTextField2.setText(rs.getString("Prenom"));
+                jTextField3.setText(rs.getString("Adresse"));
+                jTextField4.setText(rs.getString("Date De Naissance")); // Ensure this matches DB column name
+                jTextField5.setText(rs.getString("Email"));
+                jTextField6.setText(rs.getString("Mot de passe")); // SECURITY RISK: Loading plain text password
+                
+                String sexe = rs.getString("Sexe");
+                if ("Male".equalsIgnoreCase(sexe)) {
+                    jComboBox3.setSelectedItem("Male");
+                } else if ("Female".equalsIgnoreCase(sexe)) {
+                    jComboBox3.setSelectedItem("Female");
+                } else {
+                    jComboBox3.setSelectedIndex(0); // Default or handle other cases
+                }
+            } else {
+                JOptionPane.showMessageDialog(this, "Client non trouvé dans la base de données.", "Erreur", JOptionPane.ERROR_MESSAGE);
+                // Clear fields if client not found
+                jTextField1.setText("");
+                jTextField2.setText("");
+                jTextField3.setText("");
+                jTextField4.setText("");
+                jTextField5.setText("");
+                jTextField6.setText("");
+                jComboBox3.setSelectedIndex(0);
+            }
+        } catch (SQLException e) {
+            JOptionPane.showMessageDialog(this, "Erreur de base de données lors du chargement des informations: " + e.getMessage(), "Erreur SQL", JOptionPane.ERROR_MESSAGE);
+            e.printStackTrace();
+        } finally {
+            try { if (rs != null) rs.close(); } catch (SQLException e) { e.printStackTrace(); }
+            try { if (pstmt != null) pstmt.close(); } catch (SQLException e) { e.printStackTrace(); }
+            try { if (conn != null) conn.close(); } catch (SQLException e) { e.printStackTrace(); }
+        }
+    }
+
+
+    
+    private boolean hasActiveSubscription() throws SQLException {
+        // ... (Keep this method as is, it manages its own connection)
+        if (this.clientId == 0) return false;
+        Connection conn = null; PreparedStatement pstmt = null; ResultSet rs = null; boolean activeSubExists = false;
+        try {
+            conn = DriverManager.getConnection("jdbc:mysql://localhost:3306/gym", "root", "votre_nouveau_mot_de_passe");
+            String sql = "SELECT COUNT(*) as active_count FROM abonnement WHERE client_id = ? AND Status = 'actif' AND `Date du fin` >= CURDATE()";
+            pstmt = conn.prepareStatement(sql); pstmt.setInt(1, this.clientId);
+            rs = pstmt.executeQuery();
+            if (rs.next()) { if (rs.getInt("active_count") > 0) { activeSubExists = true; } }
+        } finally {
+            try { if (rs != null) rs.close(); } catch (SQLException e) { e.printStackTrace(); }
+            try { if (pstmt != null) pstmt.close(); } catch (SQLException e) { e.printStackTrace(); }
+            try { if (conn != null) conn.close(); } catch (SQLException e) { e.printStackTrace(); }
+        }
+        return activeSubExists;
+    }
+
+    
+    private void loadPaymentHistory() {
+    if (this.clientId == 0) {
+        // Clear table if no client is loaded or an error occurred earlier
+        DefaultTableModel model = (DefaultTableModel) jTable1.getModel();
+        model.setRowCount(0); // Clear existing rows
+        // Optionally display a message in the table or a label
+        return;
+    }
+
+    DefaultTableModel model = (DefaultTableModel) jTable1.getModel();
+    model.setRowCount(0); // Clear existing rows before loading new ones
+
+    Connection conn = null;
+    PreparedStatement pstmt = null;
+    ResultSet rs = null;
+
+    // Formatters for displaying date and time nicely in the table
+    DateTimeFormatter dateFormatter = DateTimeFormatter.ofPattern("dd/MM/yyyy");
+    DateTimeFormatter timeFormatter = DateTimeFormatter.ofPattern("HH:mm:ss");
+
+    try {
+        conn = DriverManager.getConnection("jdbc:mysql://localhost:3306/gym", "root", "votre_nouveau_mot_de_passe");
+        // Select payment history for the current client, order by most recent first
+        String sql = "SELECT id, Client, montant, date, heure FROM paiment WHERE Client = ? ORDER BY date DESC, heure DESC";
+        pstmt = conn.prepareStatement(sql);
+        pstmt.setInt(1, this.clientId);
+        rs = pstmt.executeQuery();
+
+        while (rs.next()) {
+            int transactionId = rs.getInt("id");
+            int clientIdFromDb = rs.getInt("Client"); // Could be used for verification or display if needed
+            int montant = rs.getInt("montant");
+            java.sql.Date dateSql = rs.getDate("date");
+            java.sql.Time timeSql = rs.getTime("heure");
+
+            String formattedDate = (dateSql != null) ? dateSql.toLocalDate().format(dateFormatter) : "N/A";
+            String formattedTime = (timeSql != null) ? timeSql.toLocalTime().format(timeFormatter) : "N/A";
+
+            // Add row to the table model
+            // Column order: "id transaction", "Client", "Montant", "Date", "heure"
+            model.addRow(new Object[]{
+                transactionId,
+                clientIdFromDb, // You might want to show client name instead, requires a JOIN or another lookup
+                montant,
+                formattedDate,
+                formattedTime
+            });
+        }
+
+        if (model.getRowCount() == 0) {
+            // Optionally, display a message if no payment history is found
+            // For example, add a single row with a message, or update a separate label.
+        }
+
+    } catch (SQLException e) {
+        JOptionPane.showMessageDialog(this, "Erreur lors du chargement de l'historique des paiements: " + e.getMessage(), "Erreur DB", JOptionPane.ERROR_MESSAGE);
+        Logger.getLogger(AcceuilClient.class.getName()).log(Level.SEVERE, "Error loading payment history", e);
+    } finally {
+        try { if (rs != null) rs.close(); } catch (SQLException e) { e.printStackTrace(); }
+        try { if (pstmt != null) pstmt.close(); } catch (SQLException e) { e.printStackTrace(); }
+        try { if (conn != null) conn.close(); } catch (SQLException e) { e.printStackTrace(); }
+    }
+}
+
 
     /**
      * This method is called from within the constructor to initialize the form.
@@ -33,15 +510,12 @@ public class AcceuilClient extends javax.swing.JFrame {
         tabbedPaneCustom1 = new raven.tabbed.TabbedPaneCustom();
         jPanel2 = new javax.swing.JPanel();
         jLabel1 = new javax.swing.JLabel();
-        jPanel10 = new javax.swing.JPanel();
-        jLabel2 = new javax.swing.JLabel();
-        jLabel5 = new javax.swing.JLabel();
         jSeparator1 = new javax.swing.JSeparator();
         jSeparator2 = new javax.swing.JSeparator();
-        jPanel11 = new javax.swing.JPanel();
-        jLabel3 = new javax.swing.JLabel();
-        jLabel4 = new javax.swing.JLabel();
         jSeparator4 = new javax.swing.JSeparator();
+        jPanel16 = new javax.swing.JPanel();
+        jLabel40 = new javax.swing.JLabel();
+        jLabel41 = new javax.swing.JLabel();
         jPanel3 = new javax.swing.JPanel();
         jLabel6 = new javax.swing.JLabel();
         jLabel7 = new javax.swing.JLabel();
@@ -59,7 +533,7 @@ public class AcceuilClient extends javax.swing.JFrame {
         jButton1 = new javax.swing.JButton();
         jButton2 = new javax.swing.JButton();
         jLabel34 = new javax.swing.JLabel();
-        jTextField9 = new javax.swing.JTextField();
+        jComboBox3 = new javax.swing.JComboBox<>();
         jPanel4 = new javax.swing.JPanel();
         jPanel12 = new javax.swing.JPanel();
         jLabel13 = new javax.swing.JLabel();
@@ -85,24 +559,12 @@ public class AcceuilClient extends javax.swing.JFrame {
         jLabel37 = new javax.swing.JLabel();
         jLabel38 = new javax.swing.JLabel();
         jLabel39 = new javax.swing.JLabel();
-        jPanel5 = new javax.swing.JPanel();
-        jPanel13 = new javax.swing.JPanel();
-        jLabel27 = new javax.swing.JLabel();
-        jComboBox1 = new javax.swing.JComboBox<>();
-        jTextField7 = new javax.swing.JTextField();
-        jLabel28 = new javax.swing.JLabel();
-        jLabel29 = new javax.swing.JLabel();
-        jComboBox2 = new javax.swing.JComboBox<>();
-        jTextField8 = new javax.swing.JTextField();
-        jLabel30 = new javax.swing.JLabel();
-        jButton7 = new javax.swing.JButton();
-        jPanel6 = new javax.swing.JPanel();
-        jPanel14 = new javax.swing.JPanel();
-        jLabel31 = new javax.swing.JLabel();
         jPanel7 = new javax.swing.JPanel();
         jPanel8 = new javax.swing.JPanel();
         jPanel15 = new javax.swing.JPanel();
         jLabel32 = new javax.swing.JLabel();
+        jScrollPane1 = new javax.swing.JScrollPane();
+        jTable1 = new javax.swing.JTable();
         jPanel9 = new javax.swing.JPanel();
         jLabel33 = new javax.swing.JLabel();
         jButton8 = new javax.swing.JButton();
@@ -115,66 +577,34 @@ public class AcceuilClient extends javax.swing.JFrame {
         tabbedPaneCustom1.setUnselectedColor(new java.awt.Color(247, 191, 191));
 
         jLabel1.setFont(new java.awt.Font("Segoe UI", 1, 24)); // NOI18N
-        jLabel1.setText("Bienvenue");
+        jLabel1.setText("Bienvenue de nouveau !");
 
-        jPanel10.setBackground(new java.awt.Color(204, 204, 204));
+        jPanel16.setBackground(new java.awt.Color(204, 204, 204));
 
-        jLabel2.setFont(new java.awt.Font("Segoe UI", 3, 18)); // NOI18N
-        jLabel2.setText("Mon Abonnement Actuel:");
+        jLabel40.setFont(new java.awt.Font("Segoe UI", 3, 18)); // NOI18N
+        jLabel40.setText("Mon Solde");
 
-        jLabel5.setText("Abonnement Actuel exemple");
+        jLabel41.setText("jLabel41");
 
-        javax.swing.GroupLayout jPanel10Layout = new javax.swing.GroupLayout(jPanel10);
-        jPanel10.setLayout(jPanel10Layout);
-        jPanel10Layout.setHorizontalGroup(
-            jPanel10Layout.createParallelGroup(javax.swing.GroupLayout.Alignment.LEADING)
-            .addGroup(jPanel10Layout.createSequentialGroup()
-                .addGroup(jPanel10Layout.createParallelGroup(javax.swing.GroupLayout.Alignment.LEADING)
-                    .addGroup(jPanel10Layout.createSequentialGroup()
-                        .addContainerGap()
-                        .addComponent(jLabel2))
-                    .addGroup(jPanel10Layout.createSequentialGroup()
-                        .addGap(34, 34, 34)
-                        .addComponent(jLabel5, javax.swing.GroupLayout.PREFERRED_SIZE, 825, javax.swing.GroupLayout.PREFERRED_SIZE)))
-                .addContainerGap(209, Short.MAX_VALUE))
+        javax.swing.GroupLayout jPanel16Layout = new javax.swing.GroupLayout(jPanel16);
+        jPanel16.setLayout(jPanel16Layout);
+        jPanel16Layout.setHorizontalGroup(
+            jPanel16Layout.createParallelGroup(javax.swing.GroupLayout.Alignment.LEADING)
+            .addGroup(jPanel16Layout.createSequentialGroup()
+                .addGap(14, 14, 14)
+                .addGroup(jPanel16Layout.createParallelGroup(javax.swing.GroupLayout.Alignment.TRAILING)
+                    .addComponent(jLabel41)
+                    .addComponent(jLabel40))
+                .addContainerGap(1016, Short.MAX_VALUE))
         );
-        jPanel10Layout.setVerticalGroup(
-            jPanel10Layout.createParallelGroup(javax.swing.GroupLayout.Alignment.LEADING)
-            .addGroup(jPanel10Layout.createSequentialGroup()
-                .addComponent(jLabel2)
+        jPanel16Layout.setVerticalGroup(
+            jPanel16Layout.createParallelGroup(javax.swing.GroupLayout.Alignment.LEADING)
+            .addGroup(jPanel16Layout.createSequentialGroup()
+                .addContainerGap()
+                .addComponent(jLabel40)
                 .addGap(18, 18, 18)
-                .addComponent(jLabel5, javax.swing.GroupLayout.PREFERRED_SIZE, 47, javax.swing.GroupLayout.PREFERRED_SIZE)
-                .addContainerGap(24, Short.MAX_VALUE))
-        );
-
-        jPanel11.setBackground(new java.awt.Color(204, 204, 204));
-
-        jLabel3.setFont(new java.awt.Font("Segoe UI", 3, 18)); // NOI18N
-        jLabel3.setText("Mon Prochain Cour :");
-
-        jLabel4.setText("Prochain cour exemple");
-
-        javax.swing.GroupLayout jPanel11Layout = new javax.swing.GroupLayout(jPanel11);
-        jPanel11.setLayout(jPanel11Layout);
-        jPanel11Layout.setHorizontalGroup(
-            jPanel11Layout.createParallelGroup(javax.swing.GroupLayout.Alignment.LEADING)
-            .addGroup(jPanel11Layout.createSequentialGroup()
-                .addGroup(jPanel11Layout.createParallelGroup(javax.swing.GroupLayout.Alignment.LEADING)
-                    .addGroup(jPanel11Layout.createSequentialGroup()
-                        .addContainerGap()
-                        .addComponent(jLabel3))
-                    .addGroup(jPanel11Layout.createSequentialGroup()
-                        .addGap(54, 54, 54)
-                        .addComponent(jLabel4, javax.swing.GroupLayout.PREFERRED_SIZE, 825, javax.swing.GroupLayout.PREFERRED_SIZE)))
-                .addContainerGap(183, Short.MAX_VALUE))
-        );
-        jPanel11Layout.setVerticalGroup(
-            jPanel11Layout.createParallelGroup(javax.swing.GroupLayout.Alignment.LEADING)
-            .addGroup(jPanel11Layout.createSequentialGroup()
-                .addComponent(jLabel3)
-                .addGap(18, 18, 18)
-                .addComponent(jLabel4, javax.swing.GroupLayout.PREFERRED_SIZE, 47, javax.swing.GroupLayout.PREFERRED_SIZE)
-                .addContainerGap(31, Short.MAX_VALUE))
+                .addComponent(jLabel41)
+                .addContainerGap(44, Short.MAX_VALUE))
         );
 
         javax.swing.GroupLayout jPanel2Layout = new javax.swing.GroupLayout(jPanel2);
@@ -186,23 +616,23 @@ public class AcceuilClient extends javax.swing.JFrame {
                 .addGap(0, 0, Short.MAX_VALUE))
             .addGroup(jPanel2Layout.createSequentialGroup()
                 .addGroup(jPanel2Layout.createParallelGroup(javax.swing.GroupLayout.Alignment.LEADING)
-                    .addComponent(jPanel10, javax.swing.GroupLayout.Alignment.TRAILING, javax.swing.GroupLayout.DEFAULT_SIZE, javax.swing.GroupLayout.DEFAULT_SIZE, Short.MAX_VALUE)
-                    .addComponent(jSeparator4)
+                    .addGroup(jPanel2Layout.createSequentialGroup()
+                        .addGap(1085, 1085, 1085)
+                        .addComponent(jSeparator4, javax.swing.GroupLayout.DEFAULT_SIZE, 62, Short.MAX_VALUE))
                     .addGroup(jPanel2Layout.createSequentialGroup()
                         .addGroup(jPanel2Layout.createParallelGroup(javax.swing.GroupLayout.Alignment.LEADING)
                             .addGroup(jPanel2Layout.createSequentialGroup()
                                 .addGap(280, 280, 280)
-                                .addComponent(jLabel1, javax.swing.GroupLayout.PREFERRED_SIZE, 293, javax.swing.GroupLayout.PREFERRED_SIZE))
+                                .addComponent(jLabel1))
                             .addGroup(jPanel2Layout.createSequentialGroup()
                                 .addContainerGap()
                                 .addComponent(jSeparator1, javax.swing.GroupLayout.PREFERRED_SIZE, 836, javax.swing.GroupLayout.PREFERRED_SIZE)))
                         .addGap(0, 0, Short.MAX_VALUE)))
                 .addContainerGap())
-            .addGroup(jPanel2Layout.createParallelGroup(javax.swing.GroupLayout.Alignment.LEADING)
-                .addGroup(jPanel2Layout.createSequentialGroup()
-                    .addContainerGap()
-                    .addComponent(jPanel11, javax.swing.GroupLayout.DEFAULT_SIZE, javax.swing.GroupLayout.DEFAULT_SIZE, Short.MAX_VALUE)
-                    .addContainerGap()))
+            .addGroup(jPanel2Layout.createSequentialGroup()
+                .addContainerGap()
+                .addComponent(jPanel16, javax.swing.GroupLayout.PREFERRED_SIZE, javax.swing.GroupLayout.DEFAULT_SIZE, javax.swing.GroupLayout.PREFERRED_SIZE)
+                .addContainerGap(javax.swing.GroupLayout.DEFAULT_SIZE, Short.MAX_VALUE))
         );
         jPanel2Layout.setVerticalGroup(
             jPanel2Layout.createParallelGroup(javax.swing.GroupLayout.Alignment.LEADING)
@@ -211,18 +641,13 @@ public class AcceuilClient extends javax.swing.JFrame {
                 .addComponent(jLabel1, javax.swing.GroupLayout.PREFERRED_SIZE, 41, javax.swing.GroupLayout.PREFERRED_SIZE)
                 .addGap(5, 5, 5)
                 .addComponent(jSeparator2, javax.swing.GroupLayout.PREFERRED_SIZE, 10, javax.swing.GroupLayout.PREFERRED_SIZE)
-                .addGap(137, 137, 137)
+                .addGap(10, 10, 10)
+                .addComponent(jPanel16, javax.swing.GroupLayout.PREFERRED_SIZE, javax.swing.GroupLayout.DEFAULT_SIZE, javax.swing.GroupLayout.PREFERRED_SIZE)
+                .addGap(18, 18, 18)
                 .addComponent(jSeparator1, javax.swing.GroupLayout.PREFERRED_SIZE, 10, javax.swing.GroupLayout.PREFERRED_SIZE)
-                .addPreferredGap(javax.swing.LayoutStyle.ComponentPlacement.RELATED)
-                .addComponent(jPanel10, javax.swing.GroupLayout.PREFERRED_SIZE, javax.swing.GroupLayout.DEFAULT_SIZE, javax.swing.GroupLayout.PREFERRED_SIZE)
-                .addPreferredGap(javax.swing.LayoutStyle.ComponentPlacement.RELATED)
+                .addGap(126, 126, 126)
                 .addComponent(jSeparator4, javax.swing.GroupLayout.PREFERRED_SIZE, 10, javax.swing.GroupLayout.PREFERRED_SIZE)
-                .addContainerGap(118, Short.MAX_VALUE))
-            .addGroup(jPanel2Layout.createParallelGroup(javax.swing.GroupLayout.Alignment.LEADING)
-                .addGroup(jPanel2Layout.createSequentialGroup()
-                    .addGap(103, 103, 103)
-                    .addComponent(jPanel11, javax.swing.GroupLayout.PREFERRED_SIZE, javax.swing.GroupLayout.DEFAULT_SIZE, javax.swing.GroupLayout.PREFERRED_SIZE)
-                    .addContainerGap(267, Short.MAX_VALUE)))
+                .addContainerGap(186, Short.MAX_VALUE))
         );
 
         tabbedPaneCustom1.addTab("Acceuil", jPanel2);
@@ -301,11 +726,7 @@ public class AcceuilClient extends javax.swing.JFrame {
         jLabel34.setFont(new java.awt.Font("Segoe UI", 2, 14)); // NOI18N
         jLabel34.setText("Sexe");
 
-        jTextField9.addActionListener(new java.awt.event.ActionListener() {
-            public void actionPerformed(java.awt.event.ActionEvent evt) {
-                jTextField9ActionPerformed(evt);
-            }
-        });
+        jComboBox3.setModel(new javax.swing.DefaultComboBoxModel<>(new String[] { "Male", "Female" }));
 
         javax.swing.GroupLayout jPanel3Layout = new javax.swing.GroupLayout(jPanel3);
         jPanel3.setLayout(jPanel3Layout);
@@ -346,8 +767,9 @@ public class AcceuilClient extends javax.swing.JFrame {
                             .addGroup(jPanel3Layout.createSequentialGroup()
                                 .addComponent(jLabel34)
                                 .addPreferredGap(javax.swing.LayoutStyle.ComponentPlacement.RELATED)
-                                .addComponent(jTextField9, javax.swing.GroupLayout.PREFERRED_SIZE, 287, javax.swing.GroupLayout.PREFERRED_SIZE)))))
-                .addContainerGap(410, Short.MAX_VALUE))
+                                .addComponent(jComboBox3, javax.swing.GroupLayout.PREFERRED_SIZE, javax.swing.GroupLayout.DEFAULT_SIZE, javax.swing.GroupLayout.PREFERRED_SIZE)
+                                .addGap(211, 211, 211)))))
+                .addContainerGap(489, Short.MAX_VALUE))
             .addGroup(javax.swing.GroupLayout.Alignment.TRAILING, jPanel3Layout.createSequentialGroup()
                 .addGap(0, 0, Short.MAX_VALUE)
                 .addComponent(jButton1)
@@ -386,7 +808,7 @@ public class AcceuilClient extends javax.swing.JFrame {
                     .addComponent(jTextField6, javax.swing.GroupLayout.PREFERRED_SIZE, javax.swing.GroupLayout.DEFAULT_SIZE, javax.swing.GroupLayout.PREFERRED_SIZE))
                 .addGroup(jPanel3Layout.createParallelGroup(javax.swing.GroupLayout.Alignment.LEADING)
                     .addGroup(jPanel3Layout.createSequentialGroup()
-                        .addPreferredGap(javax.swing.LayoutStyle.ComponentPlacement.RELATED, 36, Short.MAX_VALUE)
+                        .addPreferredGap(javax.swing.LayoutStyle.ComponentPlacement.RELATED, 104, Short.MAX_VALUE)
                         .addGroup(jPanel3Layout.createParallelGroup(javax.swing.GroupLayout.Alignment.BASELINE)
                             .addComponent(jButton1)
                             .addComponent(jButton2))
@@ -395,7 +817,7 @@ public class AcceuilClient extends javax.swing.JFrame {
                         .addPreferredGap(javax.swing.LayoutStyle.ComponentPlacement.UNRELATED)
                         .addGroup(jPanel3Layout.createParallelGroup(javax.swing.GroupLayout.Alignment.BASELINE)
                             .addComponent(jLabel34)
-                            .addComponent(jTextField9, javax.swing.GroupLayout.PREFERRED_SIZE, javax.swing.GroupLayout.DEFAULT_SIZE, javax.swing.GroupLayout.PREFERRED_SIZE))
+                            .addComponent(jComboBox3, javax.swing.GroupLayout.PREFERRED_SIZE, javax.swing.GroupLayout.DEFAULT_SIZE, javax.swing.GroupLayout.PREFERRED_SIZE))
                         .addContainerGap(javax.swing.GroupLayout.DEFAULT_SIZE, Short.MAX_VALUE))))
         );
 
@@ -444,70 +866,73 @@ public class AcceuilClient extends javax.swing.JFrame {
         jPanel12Layout.setHorizontalGroup(
             jPanel12Layout.createParallelGroup(javax.swing.GroupLayout.Alignment.LEADING)
             .addGroup(jPanel12Layout.createSequentialGroup()
-                .addGap(385, 385, 385)
-                .addComponent(jLabel13, javax.swing.GroupLayout.PREFERRED_SIZE, 141, javax.swing.GroupLayout.PREFERRED_SIZE)
-                .addContainerGap(javax.swing.GroupLayout.DEFAULT_SIZE, Short.MAX_VALUE))
-            .addGroup(javax.swing.GroupLayout.Alignment.TRAILING, jPanel12Layout.createSequentialGroup()
-                .addGroup(jPanel12Layout.createParallelGroup(javax.swing.GroupLayout.Alignment.TRAILING)
+                .addGap(15, 15, 15)
+                .addComponent(jLabel16)
+                .addPreferredGap(javax.swing.LayoutStyle.ComponentPlacement.RELATED)
+                .addGroup(jPanel12Layout.createParallelGroup(javax.swing.GroupLayout.Alignment.LEADING)
                     .addGroup(jPanel12Layout.createSequentialGroup()
-                        .addGap(15, 15, 15)
-                        .addComponent(jLabel16)
+                        .addComponent(jLabel20)
                         .addPreferredGap(javax.swing.LayoutStyle.ComponentPlacement.RELATED)
+                        .addComponent(jLabel19)
+                        .addGap(0, 0, Short.MAX_VALUE))
+                    .addGroup(jPanel12Layout.createSequentialGroup()
                         .addGroup(jPanel12Layout.createParallelGroup(javax.swing.GroupLayout.Alignment.LEADING)
+                            .addGroup(jPanel12Layout.createSequentialGroup()
+                                .addComponent(jLabel35)
+                                .addPreferredGap(javax.swing.LayoutStyle.ComponentPlacement.RELATED)
+                                .addComponent(jLabel36))
+                            .addGroup(jPanel12Layout.createSequentialGroup()
+                                .addComponent(jLabel22)
+                                .addPreferredGap(javax.swing.LayoutStyle.ComponentPlacement.RELATED)
+                                .addComponent(jLabel21))
                             .addGroup(jPanel12Layout.createSequentialGroup()
                                 .addComponent(jLabel14)
                                 .addPreferredGap(javax.swing.LayoutStyle.ComponentPlacement.RELATED)
                                 .addComponent(jLabel15))
                             .addGroup(jPanel12Layout.createSequentialGroup()
-                                .addComponent(jLabel20)
-                                .addPreferredGap(javax.swing.LayoutStyle.ComponentPlacement.RELATED)
-                                .addComponent(jLabel19)))
-                        .addGap(194, 194, 194)
-                        .addComponent(jLabel35)
-                        .addPreferredGap(javax.swing.LayoutStyle.ComponentPlacement.RELATED)
-                        .addComponent(jLabel36)
-                        .addPreferredGap(javax.swing.LayoutStyle.ComponentPlacement.RELATED, 302, Short.MAX_VALUE)
-                        .addGroup(jPanel12Layout.createParallelGroup(javax.swing.GroupLayout.Alignment.LEADING)
-                            .addGroup(jPanel12Layout.createSequentialGroup()
                                 .addComponent(jLabel18)
                                 .addPreferredGap(javax.swing.LayoutStyle.ComponentPlacement.RELATED)
-                                .addComponent(jLabel17))
-                            .addGroup(jPanel12Layout.createSequentialGroup()
-                                .addComponent(jLabel22)
-                                .addPreferredGap(javax.swing.LayoutStyle.ComponentPlacement.RELATED)
-                                .addComponent(jLabel21))))
+                                .addComponent(jLabel17)))
+                        .addContainerGap(956, Short.MAX_VALUE))))
+            .addGroup(jPanel12Layout.createSequentialGroup()
+                .addGroup(jPanel12Layout.createParallelGroup(javax.swing.GroupLayout.Alignment.LEADING)
                     .addGroup(jPanel12Layout.createSequentialGroup()
-                        .addContainerGap(javax.swing.GroupLayout.DEFAULT_SIZE, Short.MAX_VALUE)
+                        .addGap(89, 89, 89)
+                        .addComponent(jLabel13, javax.swing.GroupLayout.PREFERRED_SIZE, 141, javax.swing.GroupLayout.PREFERRED_SIZE))
+                    .addGroup(jPanel12Layout.createSequentialGroup()
+                        .addGap(160, 160, 160)
                         .addComponent(jButton3)))
-                .addGap(151, 151, 151))
+                .addGap(0, 0, Short.MAX_VALUE))
         );
         jPanel12Layout.setVerticalGroup(
             jPanel12Layout.createParallelGroup(javax.swing.GroupLayout.Alignment.LEADING)
             .addGroup(jPanel12Layout.createSequentialGroup()
-                .addGroup(jPanel12Layout.createParallelGroup(javax.swing.GroupLayout.Alignment.LEADING)
-                    .addGroup(jPanel12Layout.createSequentialGroup()
-                        .addComponent(jLabel13, javax.swing.GroupLayout.PREFERRED_SIZE, 16, javax.swing.GroupLayout.PREFERRED_SIZE)
-                        .addGap(18, 18, 18)
-                        .addGroup(jPanel12Layout.createParallelGroup(javax.swing.GroupLayout.Alignment.BASELINE)
-                            .addComponent(jLabel14)
-                            .addComponent(jLabel15)
-                            .addComponent(jLabel18)
-                            .addComponent(jLabel17))
-                        .addPreferredGap(javax.swing.LayoutStyle.ComponentPlacement.RELATED)
-                        .addGroup(jPanel12Layout.createParallelGroup(javax.swing.GroupLayout.Alignment.BASELINE)
-                            .addComponent(jLabel20)
-                            .addComponent(jLabel19)
-                            .addComponent(jLabel22)
-                            .addComponent(jLabel21)))
-                    .addGroup(jPanel12Layout.createSequentialGroup()
-                        .addGap(43, 43, 43)
-                        .addGroup(jPanel12Layout.createParallelGroup(javax.swing.GroupLayout.Alignment.BASELINE)
-                            .addComponent(jLabel35)
-                            .addComponent(jLabel36))))
-                .addGap(12, 12, 12)
+                .addComponent(jLabel13, javax.swing.GroupLayout.PREFERRED_SIZE, 16, javax.swing.GroupLayout.PREFERRED_SIZE)
+                .addPreferredGap(javax.swing.LayoutStyle.ComponentPlacement.RELATED)
+                .addGroup(jPanel12Layout.createParallelGroup(javax.swing.GroupLayout.Alignment.BASELINE)
+                    .addComponent(jLabel35)
+                    .addComponent(jLabel36))
+                .addPreferredGap(javax.swing.LayoutStyle.ComponentPlacement.RELATED)
+                .addGroup(jPanel12Layout.createParallelGroup(javax.swing.GroupLayout.Alignment.BASELINE)
+                    .addComponent(jLabel14)
+                    .addComponent(jLabel15))
+                .addPreferredGap(javax.swing.LayoutStyle.ComponentPlacement.RELATED)
+                .addGroup(jPanel12Layout.createParallelGroup(javax.swing.GroupLayout.Alignment.BASELINE)
+                    .addComponent(jLabel18)
+                    .addComponent(jLabel17))
+                .addGap(4, 4, 4)
+                .addGroup(jPanel12Layout.createParallelGroup(javax.swing.GroupLayout.Alignment.BASELINE)
+                    .addComponent(jLabel20)
+                    .addComponent(jLabel19))
+                .addPreferredGap(javax.swing.LayoutStyle.ComponentPlacement.RELATED)
+                .addGroup(jPanel12Layout.createParallelGroup(javax.swing.GroupLayout.Alignment.BASELINE)
+                    .addComponent(jLabel22)
+                    .addComponent(jLabel21))
+                .addGap(22, 22, 22)
+                .addComponent(jLabel16)
+                .addGap(18, 18, 18)
                 .addComponent(jButton3)
-                .addGap(11, 11, 11)
-                .addComponent(jLabel16))
+                .addContainerGap(50, Short.MAX_VALUE))
         );
 
         jLabel23.setFont(new java.awt.Font("Segoe UI", 3, 14)); // NOI18N
@@ -534,6 +959,11 @@ public class AcceuilClient extends javax.swing.JFrame {
         jLabel25.setIcon(new javax.swing.ImageIcon(getClass().getResource("/Images/happy-new-year.png"))); // NOI18N
 
         jButton6.setText("Inscrire");
+        jButton6.addActionListener(new java.awt.event.ActionListener() {
+            public void actionPerformed(java.awt.event.ActionEvent evt) {
+                jButton6ActionPerformed(evt);
+            }
+        });
 
         jLabel37.setText("800 DA");
 
@@ -571,7 +1001,7 @@ public class AcceuilClient extends javax.swing.JFrame {
                                     .addGroup(jPanel4Layout.createParallelGroup(javax.swing.GroupLayout.Alignment.TRAILING)
                                         .addComponent(jLabel39)
                                         .addComponent(jLabel25, javax.swing.GroupLayout.PREFERRED_SIZE, 59, javax.swing.GroupLayout.PREFERRED_SIZE)))))
-                        .addGap(0, 0, Short.MAX_VALUE)))
+                        .addGap(0, 380, Short.MAX_VALUE)))
                 .addContainerGap())
             .addGroup(jPanel4Layout.createSequentialGroup()
                 .addGap(118, 118, 118)
@@ -585,7 +1015,7 @@ public class AcceuilClient extends javax.swing.JFrame {
             .addGroup(jPanel4Layout.createSequentialGroup()
                 .addGap(15, 15, 15)
                 .addComponent(jPanel12, javax.swing.GroupLayout.PREFERRED_SIZE, javax.swing.GroupLayout.DEFAULT_SIZE, javax.swing.GroupLayout.PREFERRED_SIZE)
-                .addGap(26, 26, 26)
+                .addPreferredGap(javax.swing.LayoutStyle.ComponentPlacement.RELATED)
                 .addComponent(jLabel23)
                 .addGroup(jPanel4Layout.createParallelGroup(javax.swing.GroupLayout.Alignment.TRAILING)
                     .addGroup(jPanel4Layout.createSequentialGroup()
@@ -612,154 +1042,20 @@ public class AcceuilClient extends javax.swing.JFrame {
                     .addComponent(jButton4)
                     .addComponent(jButton5)
                     .addComponent(jButton6))
-                .addContainerGap(125, Short.MAX_VALUE))
+                .addContainerGap(94, Short.MAX_VALUE))
         );
 
         tabbedPaneCustom1.addTab("Mes Abonnement", jPanel4);
-
-        jPanel13.setBackground(new java.awt.Color(255, 255, 255));
-
-        jLabel27.setFont(new java.awt.Font("Segoe UI", 3, 14)); // NOI18N
-        jLabel27.setText("Types de seance :");
-
-        jComboBox1.setModel(new javax.swing.DefaultComboBoxModel<>(new String[] { "Item 1", "Item 2", "Item 3", "Item 4" }));
-
-        jLabel28.setFont(new java.awt.Font("Segoe UI", 3, 14)); // NOI18N
-        jLabel28.setText("Date :");
-
-        jLabel29.setFont(new java.awt.Font("Segoe UI", 3, 14)); // NOI18N
-        jLabel29.setText("Coach :");
-
-        jComboBox2.setModel(new javax.swing.DefaultComboBoxModel<>(new String[] { "Item 1", "Item 2", "Item 3", "Item 4" }));
-
-        jTextField8.setToolTipText("g");
-
-        jLabel30.setFont(new java.awt.Font("Segoe UI", 3, 14)); // NOI18N
-        jLabel30.setText("Heure :");
-
-        jButton7.setText("Reserver");
-        jButton7.addActionListener(new java.awt.event.ActionListener() {
-            public void actionPerformed(java.awt.event.ActionEvent evt) {
-                jButton7ActionPerformed(evt);
-            }
-        });
-
-        javax.swing.GroupLayout jPanel13Layout = new javax.swing.GroupLayout(jPanel13);
-        jPanel13.setLayout(jPanel13Layout);
-        jPanel13Layout.setHorizontalGroup(
-            jPanel13Layout.createParallelGroup(javax.swing.GroupLayout.Alignment.LEADING)
-            .addGroup(jPanel13Layout.createSequentialGroup()
-                .addGap(19, 19, 19)
-                .addGroup(jPanel13Layout.createParallelGroup(javax.swing.GroupLayout.Alignment.TRAILING)
-                    .addComponent(jLabel29)
-                    .addComponent(jLabel28)
-                    .addComponent(jLabel27)
-                    .addComponent(jLabel30))
-                .addPreferredGap(javax.swing.LayoutStyle.ComponentPlacement.UNRELATED)
-                .addGroup(jPanel13Layout.createParallelGroup(javax.swing.GroupLayout.Alignment.LEADING, false)
-                    .addComponent(jTextField7)
-                    .addComponent(jComboBox2, 0, javax.swing.GroupLayout.DEFAULT_SIZE, Short.MAX_VALUE)
-                    .addComponent(jComboBox1, 0, javax.swing.GroupLayout.DEFAULT_SIZE, Short.MAX_VALUE)
-                    .addComponent(jTextField8, javax.swing.GroupLayout.PREFERRED_SIZE, 76, javax.swing.GroupLayout.PREFERRED_SIZE))
-                .addContainerGap(221, Short.MAX_VALUE))
-            .addGroup(javax.swing.GroupLayout.Alignment.TRAILING, jPanel13Layout.createSequentialGroup()
-                .addContainerGap(javax.swing.GroupLayout.DEFAULT_SIZE, Short.MAX_VALUE)
-                .addComponent(jButton7)
-                .addGap(51, 51, 51))
-        );
-        jPanel13Layout.setVerticalGroup(
-            jPanel13Layout.createParallelGroup(javax.swing.GroupLayout.Alignment.LEADING)
-            .addGroup(jPanel13Layout.createSequentialGroup()
-                .addGap(19, 19, 19)
-                .addGroup(jPanel13Layout.createParallelGroup(javax.swing.GroupLayout.Alignment.BASELINE)
-                    .addComponent(jLabel27)
-                    .addComponent(jComboBox1, javax.swing.GroupLayout.PREFERRED_SIZE, javax.swing.GroupLayout.DEFAULT_SIZE, javax.swing.GroupLayout.PREFERRED_SIZE))
-                .addPreferredGap(javax.swing.LayoutStyle.ComponentPlacement.RELATED)
-                .addGroup(jPanel13Layout.createParallelGroup(javax.swing.GroupLayout.Alignment.BASELINE)
-                    .addComponent(jLabel28)
-                    .addComponent(jTextField7, javax.swing.GroupLayout.PREFERRED_SIZE, javax.swing.GroupLayout.DEFAULT_SIZE, javax.swing.GroupLayout.PREFERRED_SIZE))
-                .addGap(11, 11, 11)
-                .addGroup(jPanel13Layout.createParallelGroup(javax.swing.GroupLayout.Alignment.BASELINE)
-                    .addComponent(jLabel29)
-                    .addComponent(jComboBox2, javax.swing.GroupLayout.PREFERRED_SIZE, javax.swing.GroupLayout.DEFAULT_SIZE, javax.swing.GroupLayout.PREFERRED_SIZE))
-                .addPreferredGap(javax.swing.LayoutStyle.ComponentPlacement.RELATED)
-                .addGroup(jPanel13Layout.createParallelGroup(javax.swing.GroupLayout.Alignment.BASELINE)
-                    .addComponent(jTextField8, javax.swing.GroupLayout.PREFERRED_SIZE, javax.swing.GroupLayout.DEFAULT_SIZE, javax.swing.GroupLayout.PREFERRED_SIZE)
-                    .addComponent(jLabel30))
-                .addPreferredGap(javax.swing.LayoutStyle.ComponentPlacement.RELATED, 54, Short.MAX_VALUE)
-                .addComponent(jButton7)
-                .addGap(15, 15, 15))
-        );
-
-        javax.swing.GroupLayout jPanel5Layout = new javax.swing.GroupLayout(jPanel5);
-        jPanel5.setLayout(jPanel5Layout);
-        jPanel5Layout.setHorizontalGroup(
-            jPanel5Layout.createParallelGroup(javax.swing.GroupLayout.Alignment.LEADING)
-            .addGroup(jPanel5Layout.createSequentialGroup()
-                .addGap(33, 33, 33)
-                .addComponent(jPanel13, javax.swing.GroupLayout.PREFERRED_SIZE, javax.swing.GroupLayout.DEFAULT_SIZE, javax.swing.GroupLayout.PREFERRED_SIZE)
-                .addContainerGap(603, Short.MAX_VALUE))
-        );
-        jPanel5Layout.setVerticalGroup(
-            jPanel5Layout.createParallelGroup(javax.swing.GroupLayout.Alignment.LEADING)
-            .addGroup(jPanel5Layout.createSequentialGroup()
-                .addContainerGap()
-                .addComponent(jPanel13, javax.swing.GroupLayout.PREFERRED_SIZE, javax.swing.GroupLayout.DEFAULT_SIZE, javax.swing.GroupLayout.PREFERRED_SIZE)
-                .addContainerGap(243, Short.MAX_VALUE))
-        );
-
-        tabbedPaneCustom1.addTab("Reserver une seance", jPanel5);
-
-        jPanel14.setBackground(new java.awt.Color(255, 255, 255));
-
-        jLabel31.setFont(new java.awt.Font("Segoe UI", 3, 24)); // NOI18N
-        jLabel31.setText("Historique ");
-
-        javax.swing.GroupLayout jPanel14Layout = new javax.swing.GroupLayout(jPanel14);
-        jPanel14.setLayout(jPanel14Layout);
-        jPanel14Layout.setHorizontalGroup(
-            jPanel14Layout.createParallelGroup(javax.swing.GroupLayout.Alignment.LEADING)
-            .addGroup(jPanel14Layout.createSequentialGroup()
-                .addGap(344, 344, 344)
-                .addComponent(jLabel31)
-                .addContainerGap(419, Short.MAX_VALUE))
-        );
-        jPanel14Layout.setVerticalGroup(
-            jPanel14Layout.createParallelGroup(javax.swing.GroupLayout.Alignment.LEADING)
-            .addGroup(jPanel14Layout.createSequentialGroup()
-                .addContainerGap()
-                .addComponent(jLabel31)
-                .addContainerGap(373, Short.MAX_VALUE))
-        );
-
-        javax.swing.GroupLayout jPanel6Layout = new javax.swing.GroupLayout(jPanel6);
-        jPanel6.setLayout(jPanel6Layout);
-        jPanel6Layout.setHorizontalGroup(
-            jPanel6Layout.createParallelGroup(javax.swing.GroupLayout.Alignment.LEADING)
-            .addGroup(jPanel6Layout.createSequentialGroup()
-                .addGap(20, 20, 20)
-                .addComponent(jPanel14, javax.swing.GroupLayout.PREFERRED_SIZE, javax.swing.GroupLayout.DEFAULT_SIZE, javax.swing.GroupLayout.PREFERRED_SIZE)
-                .addContainerGap(javax.swing.GroupLayout.DEFAULT_SIZE, Short.MAX_VALUE))
-        );
-        jPanel6Layout.setVerticalGroup(
-            jPanel6Layout.createParallelGroup(javax.swing.GroupLayout.Alignment.LEADING)
-            .addGroup(jPanel6Layout.createSequentialGroup()
-                .addGap(15, 15, 15)
-                .addComponent(jPanel14, javax.swing.GroupLayout.PREFERRED_SIZE, javax.swing.GroupLayout.DEFAULT_SIZE, javax.swing.GroupLayout.PREFERRED_SIZE)
-                .addContainerGap(65, Short.MAX_VALUE))
-        );
-
-        tabbedPaneCustom1.addTab("Mes Reservation", jPanel6);
 
         javax.swing.GroupLayout jPanel7Layout = new javax.swing.GroupLayout(jPanel7);
         jPanel7.setLayout(jPanel7Layout);
         jPanel7Layout.setHorizontalGroup(
             jPanel7Layout.createParallelGroup(javax.swing.GroupLayout.Alignment.LEADING)
-            .addGap(0, 1074, Short.MAX_VALUE)
+            .addGap(0, 1153, Short.MAX_VALUE)
         );
         jPanel7Layout.setVerticalGroup(
             jPanel7Layout.createParallelGroup(javax.swing.GroupLayout.Alignment.LEADING)
-            .addGap(0, 491, Short.MAX_VALUE)
+            .addGap(0, 559, Short.MAX_VALUE)
         );
 
         tabbedPaneCustom1.addTab("Messagerie", jPanel7);
@@ -771,21 +1067,41 @@ public class AcceuilClient extends javax.swing.JFrame {
         jLabel32.setFont(new java.awt.Font("Segoe UI", 3, 24)); // NOI18N
         jLabel32.setText("Historique");
 
+        jTable1.setModel(new javax.swing.table.DefaultTableModel(
+            new Object [][] {
+                {null, null, null, null, null},
+                {null, null, null, null, null},
+                {null, null, null, null, null},
+                {null, null, null, null, null}
+            },
+            new String [] {
+                "id transaction", "Client", "Montant", "Date", "heure"
+            }
+        ));
+        jScrollPane1.setViewportView(jTable1);
+
         javax.swing.GroupLayout jPanel15Layout = new javax.swing.GroupLayout(jPanel15);
         jPanel15.setLayout(jPanel15Layout);
         jPanel15Layout.setHorizontalGroup(
             jPanel15Layout.createParallelGroup(javax.swing.GroupLayout.Alignment.LEADING)
             .addGroup(jPanel15Layout.createSequentialGroup()
-                .addGap(307, 307, 307)
-                .addComponent(jLabel32)
-                .addContainerGap(419, Short.MAX_VALUE))
+                .addGroup(jPanel15Layout.createParallelGroup(javax.swing.GroupLayout.Alignment.LEADING)
+                    .addGroup(jPanel15Layout.createSequentialGroup()
+                        .addGap(307, 307, 307)
+                        .addComponent(jLabel32))
+                    .addGroup(jPanel15Layout.createSequentialGroup()
+                        .addGap(68, 68, 68)
+                        .addComponent(jScrollPane1, javax.swing.GroupLayout.PREFERRED_SIZE, 625, javax.swing.GroupLayout.PREFERRED_SIZE)))
+                .addContainerGap(151, Short.MAX_VALUE))
         );
         jPanel15Layout.setVerticalGroup(
             jPanel15Layout.createParallelGroup(javax.swing.GroupLayout.Alignment.LEADING)
             .addGroup(jPanel15Layout.createSequentialGroup()
                 .addGap(18, 18, 18)
                 .addComponent(jLabel32)
-                .addContainerGap(380, Short.MAX_VALUE))
+                .addPreferredGap(javax.swing.LayoutStyle.ComponentPlacement.RELATED, 33, Short.MAX_VALUE)
+                .addComponent(jScrollPane1, javax.swing.GroupLayout.PREFERRED_SIZE, javax.swing.GroupLayout.DEFAULT_SIZE, javax.swing.GroupLayout.PREFERRED_SIZE)
+                .addContainerGap())
         );
 
         javax.swing.GroupLayout jPanel8Layout = new javax.swing.GroupLayout(jPanel8);
@@ -795,14 +1111,14 @@ public class AcceuilClient extends javax.swing.JFrame {
             .addGroup(jPanel8Layout.createSequentialGroup()
                 .addGap(60, 60, 60)
                 .addComponent(jPanel15, javax.swing.GroupLayout.PREFERRED_SIZE, javax.swing.GroupLayout.DEFAULT_SIZE, javax.swing.GroupLayout.PREFERRED_SIZE)
-                .addContainerGap(170, Short.MAX_VALUE))
+                .addContainerGap(249, Short.MAX_VALUE))
         );
         jPanel8Layout.setVerticalGroup(
             jPanel8Layout.createParallelGroup(javax.swing.GroupLayout.Alignment.LEADING)
             .addGroup(jPanel8Layout.createSequentialGroup()
                 .addGap(33, 33, 33)
                 .addComponent(jPanel15, javax.swing.GroupLayout.PREFERRED_SIZE, javax.swing.GroupLayout.DEFAULT_SIZE, javax.swing.GroupLayout.PREFERRED_SIZE)
-                .addContainerGap(28, Short.MAX_VALUE))
+                .addContainerGap(javax.swing.GroupLayout.DEFAULT_SIZE, Short.MAX_VALUE))
         );
 
         tabbedPaneCustom1.addTab("Historique des payement", jPanel8);
@@ -829,7 +1145,7 @@ public class AcceuilClient extends javax.swing.JFrame {
                     .addGroup(jPanel9Layout.createSequentialGroup()
                         .addGap(379, 379, 379)
                         .addComponent(jButton8)))
-                .addContainerGap(522, Short.MAX_VALUE))
+                .addContainerGap(601, Short.MAX_VALUE))
         );
         jPanel9Layout.setVerticalGroup(
             jPanel9Layout.createParallelGroup(javax.swing.GroupLayout.Alignment.LEADING)
@@ -838,7 +1154,7 @@ public class AcceuilClient extends javax.swing.JFrame {
                 .addComponent(jLabel33)
                 .addGap(18, 18, 18)
                 .addComponent(jButton8)
-                .addContainerGap(341, Short.MAX_VALUE))
+                .addContainerGap(409, Short.MAX_VALUE))
         );
 
         tabbedPaneCustom1.addTab("Déconnexion", jPanel9);
@@ -869,65 +1185,159 @@ public class AcceuilClient extends javax.swing.JFrame {
         setLocationRelativeTo(null);
     }// </editor-fold>//GEN-END:initComponents
 
-    private void jTextField1ActionPerformed(java.awt.event.ActionEvent evt) {//GEN-FIRST:event_jTextField1ActionPerformed
+    private void jButton8ActionPerformed(java.awt.event.ActionEvent evt) {//GEN-FIRST:event_jButton8ActionPerformed
         // TODO add your handling code here:
-    }//GEN-LAST:event_jTextField1ActionPerformed
+        //Déconnexion
+        int confirm = JOptionPane.showConfirmDialog(this, "Voulez-vous vraiment vous déconnecter ?", "Confirmation de déconnexion", JOptionPane.YES_NO_OPTION);
+        if (confirm == JOptionPane.YES_OPTION) {
+            JOptionPane.showMessageDialog(this, "Déconnexion réussie.");
+            dispose();
+            new LoginScreen("Client").setVisible(true);
+        }
+    }//GEN-LAST:event_jButton8ActionPerformed
 
-    private void jTextField2ActionPerformed(java.awt.event.ActionEvent evt) {//GEN-FIRST:event_jTextField2ActionPerformed
+    private void jButton6ActionPerformed(java.awt.event.ActionEvent evt) {//GEN-FIRST:event_jButton6ActionPerformed
         // TODO add your handling code here:
-    }//GEN-LAST:event_jTextField2ActionPerformed
+        inscrireAbonnement("annuel", 17000, 365); // Adjust price and duration if needed
+    }//GEN-LAST:event_jButton6ActionPerformed
 
-    private void jTextField3ActionPerformed(java.awt.event.ActionEvent evt) {//GEN-FIRST:event_jTextField3ActionPerformed
+    private void jButton5ActionPerformed(java.awt.event.ActionEvent evt) {//GEN-FIRST:event_jButton5ActionPerformed
         // TODO add your handling code here:
-    }//GEN-LAST:event_jTextField3ActionPerformed
+        inscrireAbonnement("mensuel", 2000, 30);
+    }//GEN-LAST:event_jButton5ActionPerformed
 
-    private void jTextField4ActionPerformed(java.awt.event.ActionEvent evt) {//GEN-FIRST:event_jTextField4ActionPerformed
+    private void jButton4ActionPerformed(java.awt.event.ActionEvent evt) {//GEN-FIRST:event_jButton4ActionPerformed
         // TODO add your handling code here:
-    }//GEN-LAST:event_jTextField4ActionPerformed
+        inscrireAbonnement("hebdomadaire", 800, 7);
+    }//GEN-LAST:event_jButton4ActionPerformed
 
-    private void jTextField5ActionPerformed(java.awt.event.ActionEvent evt) {//GEN-FIRST:event_jTextField5ActionPerformed
+    private void jButton3ActionPerformed(java.awt.event.ActionEvent evt) {//GEN-FIRST:event_jButton3ActionPerformed
         // TODO add your handling code here:
-    }//GEN-LAST:event_jTextField5ActionPerformed
+        // Renouvler Abonnement
+        if (currentActiveSubDetails != null) {
+            // prix is already int in currentActiveSubDetails
+            if (this.clientSolde < currentActiveSubDetails.prix) { // Direct int comparison
+                JOptionPane.showMessageDialog(this,
+                    "Solde insuffisant pour renouveler.\nSolde actuel: " + this.clientSolde + " DA.\n" +
+                    "Prix du renouvellement: " + currentActiveSubDetails.prix + " DA.",
+                    "Solde Insuffisant", JOptionPane.WARNING_MESSAGE);
+                return;
+            }
+
+            int newSoldeCalculated = this.clientSolde - currentActiveSubDetails.prix;
+            int confirm = JOptionPane.showConfirmDialog(this,
+                "Voulez-vous renouveler votre abonnement " + currentActiveSubDetails.type +
+                " pour " + currentActiveSubDetails.prix + " DA (durée: " + currentActiveSubDetails.originalDurationDays + " jours) à partir d'aujourd'hui?\n" +
+                "Solde actuel: " + this.clientSolde + " DA.\n" +
+                "Nouveau solde après opération: " + newSoldeCalculated + " DA.",
+                "Confirmation de renouvellement", JOptionPane.YES_NO_OPTION);
+
+            if (confirm == JOptionPane.YES_OPTION) {
+                inscrireAbonnement(currentActiveSubDetails.type, currentActiveSubDetails.prix, currentActiveSubDetails.originalDurationDays);
+            }
+        } else {
+            JOptionPane.showMessageDialog(this, "Aucun abonnement actif à renouveler. Veuillez choisir un nouvel abonnement.", "Information", JOptionPane.INFORMATION_MESSAGE);
+        }
+    }//GEN-LAST:event_jButton3ActionPerformed
+
+    private void jButton2ActionPerformed(java.awt.event.ActionEvent evt) {//GEN-FIRST:event_jButton2ActionPerformed
+        // TODO add your handling code here:
+        // Logic for "Enregister" (Save) button
+        String nom = jTextField1.getText();
+        String prenom = jTextField2.getText();
+        String adresse = jTextField3.getText();
+        String dateNaissance = jTextField4.getText(); // Add validation for date format if necessary
+        String newEmail = jTextField5.getText();
+        String motDePasse = jTextField6.getText(); // SECURITY RISK: Saving plain text password
+        String sexe = jComboBox3.getSelectedItem().toString();
+
+        // Basic validation (add more as needed)
+        if (nom.isEmpty() || prenom.isEmpty() || newEmail.isEmpty() || motDePasse.isEmpty()) {
+            JOptionPane.showMessageDialog(this, "Veuillez remplir tous les champs obligatoires (Nom, Prénom, Email, Mot de passe).", "Champs Requis", JOptionPane.WARNING_MESSAGE);
+            return;
+        }
+
+        Connection conn = null;
+        PreparedStatement pstmt = null;
+
+        try {
+            conn = DriverManager.getConnection("jdbc:mysql://localhost:3306/gym", "root", "votre_nouveau_mot_de_passe");
+            // It's safer to update based on a non-editable primary key if available.
+            // Here, we use the original email (this.clientEmail) to identify the record.
+            String sql = "UPDATE client SET Nom = ?, Prenom = ?, Adresse = ?, `Date De Naissance` = ?, Email = ?, `Mot de passe` = ?, Sexe = ? WHERE Email = ?";
+            pstmt = conn.prepareStatement(sql);
+            pstmt.setString(1, nom);
+            pstmt.setString(2, prenom);
+            pstmt.setString(3, adresse);
+            pstmt.setString(4, dateNaissance);
+            pstmt.setString(5, newEmail);
+            pstmt.setString(6, motDePasse); // Storing plain text password
+            pstmt.setString(7, sexe);
+            pstmt.setString(8, this.clientEmail); // Use the original email to find the record
+
+            int affectedRows = pstmt.executeUpdate();
+
+            if (affectedRows > 0) {
+                JOptionPane.showMessageDialog(this, "Informations mises à jour avec succès !", "Succès", JOptionPane.INFORMATION_MESSAGE);
+                // If the email was changed, update the local clientEmail variable
+                if (!this.clientEmail.equals(newEmail)) {
+                    this.clientEmail = newEmail;
+                    setTitle("Accueil Client - " + this.clientEmail); // Update window title
+                }
+            } else {
+                JOptionPane.showMessageDialog(this, "Aucune modification effectuée ou client non trouvé.", "Information", JOptionPane.INFORMATION_MESSAGE);
+            }
+
+        } catch (SQLException e) {
+            JOptionPane.showMessageDialog(this, "Erreur de base de données lors de la mise à jour: " + e.getMessage(), "Erreur SQL", JOptionPane.ERROR_MESSAGE);
+            e.printStackTrace();
+        } finally {
+            try { if (pstmt != null) pstmt.close(); } catch (SQLException e) { e.printStackTrace(); }
+            try { if (conn != null) conn.close(); } catch (SQLException e) { e.printStackTrace(); }
+        }
+    }//GEN-LAST:event_jButton2ActionPerformed
+
+    private void jButton1ActionPerformed(java.awt.event.ActionEvent evt) {//GEN-FIRST:event_jButton1ActionPerformed
+        // TODO add your handling code here:
+        //  Annuler (Mon Profil)
+        int confirm = JOptionPane.showConfirmDialog(this,
+            "Voulez-vous annuler les modifications et recharger les données d'origine ?",
+            "Confirmer l'annulation",
+            JOptionPane.YES_NO_OPTION,
+            JOptionPane.QUESTION_MESSAGE);
+        if (confirm == JOptionPane.YES_OPTION) {
+            try {
+                // Reload both client profile and subscription data
+                loadClientDataAndSubscription();
+            } catch (SQLException ex) {
+                Logger.getLogger(AcceuilClient.class.getName()).log(Level.SEVERE, null, ex);
+            }
+        }
+    }//GEN-LAST:event_jButton1ActionPerformed
 
     private void jTextField6ActionPerformed(java.awt.event.ActionEvent evt) {//GEN-FIRST:event_jTextField6ActionPerformed
         // TODO add your handling code here:
     }//GEN-LAST:event_jTextField6ActionPerformed
 
-    private void jButton1ActionPerformed(java.awt.event.ActionEvent evt) {//GEN-FIRST:event_jButton1ActionPerformed
+    private void jTextField5ActionPerformed(java.awt.event.ActionEvent evt) {//GEN-FIRST:event_jTextField5ActionPerformed
         // TODO add your handling code here:
-    }//GEN-LAST:event_jButton1ActionPerformed
+    }//GEN-LAST:event_jTextField5ActionPerformed
 
-    private void jButton2ActionPerformed(java.awt.event.ActionEvent evt) {//GEN-FIRST:event_jButton2ActionPerformed
+    private void jTextField4ActionPerformed(java.awt.event.ActionEvent evt) {//GEN-FIRST:event_jTextField4ActionPerformed
         // TODO add your handling code here:
-    }//GEN-LAST:event_jButton2ActionPerformed
+    }//GEN-LAST:event_jTextField4ActionPerformed
 
-    private void jButton3ActionPerformed(java.awt.event.ActionEvent evt) {//GEN-FIRST:event_jButton3ActionPerformed
+    private void jTextField3ActionPerformed(java.awt.event.ActionEvent evt) {//GEN-FIRST:event_jTextField3ActionPerformed
         // TODO add your handling code here:
-    }//GEN-LAST:event_jButton3ActionPerformed
+    }//GEN-LAST:event_jTextField3ActionPerformed
 
-    private void jButton4ActionPerformed(java.awt.event.ActionEvent evt) {//GEN-FIRST:event_jButton4ActionPerformed
+    private void jTextField2ActionPerformed(java.awt.event.ActionEvent evt) {//GEN-FIRST:event_jTextField2ActionPerformed
         // TODO add your handling code here:
-    }//GEN-LAST:event_jButton4ActionPerformed
+    }//GEN-LAST:event_jTextField2ActionPerformed
 
-    private void jButton5ActionPerformed(java.awt.event.ActionEvent evt) {//GEN-FIRST:event_jButton5ActionPerformed
+    private void jTextField1ActionPerformed(java.awt.event.ActionEvent evt) {//GEN-FIRST:event_jTextField1ActionPerformed
         // TODO add your handling code here:
-    }//GEN-LAST:event_jButton5ActionPerformed
-
-    private void jButton8ActionPerformed(java.awt.event.ActionEvent evt) {//GEN-FIRST:event_jButton8ActionPerformed
-        // TODO add your handling code here:
-         JOptionPane.showMessageDialog(this, "Déconnexion réussie.");
-                dispose();
-                new LoginScreen("Client").setVisible(true);
-    }//GEN-LAST:event_jButton8ActionPerformed
-
-    private void jTextField9ActionPerformed(java.awt.event.ActionEvent evt) {//GEN-FIRST:event_jTextField9ActionPerformed
-        // TODO add your handling code here:
-    }//GEN-LAST:event_jTextField9ActionPerformed
-
-    private void jButton7ActionPerformed(java.awt.event.ActionEvent evt) {//GEN-FIRST:event_jButton7ActionPerformed
-        // TODO add your handling code here:
-        
-    }//GEN-LAST:event_jButton7ActionPerformed
+    }//GEN-LAST:event_jTextField1ActionPerformed
 
     /**
      * @param args the command line arguments
@@ -971,10 +1381,8 @@ public class AcceuilClient extends javax.swing.JFrame {
     private javax.swing.JButton jButton4;
     private javax.swing.JButton jButton5;
     private javax.swing.JButton jButton6;
-    private javax.swing.JButton jButton7;
     private javax.swing.JButton jButton8;
-    private javax.swing.JComboBox<String> jComboBox1;
-    private javax.swing.JComboBox<String> jComboBox2;
+    private javax.swing.JComboBox<String> jComboBox3;
     private javax.swing.JLabel jLabel1;
     private javax.swing.JLabel jLabel10;
     private javax.swing.JLabel jLabel11;
@@ -986,7 +1394,6 @@ public class AcceuilClient extends javax.swing.JFrame {
     private javax.swing.JLabel jLabel17;
     private javax.swing.JLabel jLabel18;
     private javax.swing.JLabel jLabel19;
-    private javax.swing.JLabel jLabel2;
     private javax.swing.JLabel jLabel20;
     private javax.swing.JLabel jLabel21;
     private javax.swing.JLabel jLabel22;
@@ -994,12 +1401,6 @@ public class AcceuilClient extends javax.swing.JFrame {
     private javax.swing.JLabel jLabel24;
     private javax.swing.JLabel jLabel25;
     private javax.swing.JLabel jLabel26;
-    private javax.swing.JLabel jLabel27;
-    private javax.swing.JLabel jLabel28;
-    private javax.swing.JLabel jLabel29;
-    private javax.swing.JLabel jLabel3;
-    private javax.swing.JLabel jLabel30;
-    private javax.swing.JLabel jLabel31;
     private javax.swing.JLabel jLabel32;
     private javax.swing.JLabel jLabel33;
     private javax.swing.JLabel jLabel34;
@@ -1008,40 +1409,36 @@ public class AcceuilClient extends javax.swing.JFrame {
     private javax.swing.JLabel jLabel37;
     private javax.swing.JLabel jLabel38;
     private javax.swing.JLabel jLabel39;
-    private javax.swing.JLabel jLabel4;
-    private javax.swing.JLabel jLabel5;
+    private javax.swing.JLabel jLabel40;
+    private javax.swing.JLabel jLabel41;
     private javax.swing.JLabel jLabel6;
     private javax.swing.JLabel jLabel7;
     private javax.swing.JLabel jLabel8;
     private javax.swing.JLabel jLabel9;
     private javax.swing.JPanel jPanel1;
-    private javax.swing.JPanel jPanel10;
-    private javax.swing.JPanel jPanel11;
     private javax.swing.JPanel jPanel12;
-    private javax.swing.JPanel jPanel13;
-    private javax.swing.JPanel jPanel14;
     private javax.swing.JPanel jPanel15;
+    private javax.swing.JPanel jPanel16;
     private javax.swing.JPanel jPanel2;
     private javax.swing.JPanel jPanel3;
     private javax.swing.JPanel jPanel4;
-    private javax.swing.JPanel jPanel5;
-    private javax.swing.JPanel jPanel6;
     private javax.swing.JPanel jPanel7;
     private javax.swing.JPanel jPanel8;
     private javax.swing.JPanel jPanel9;
+    private javax.swing.JScrollPane jScrollPane1;
     private javax.swing.JSeparator jSeparator1;
     private javax.swing.JSeparator jSeparator2;
     private javax.swing.JSeparator jSeparator3;
     private javax.swing.JSeparator jSeparator4;
+    private javax.swing.JTable jTable1;
     private javax.swing.JTextField jTextField1;
     private javax.swing.JTextField jTextField2;
     private javax.swing.JTextField jTextField3;
     private javax.swing.JTextField jTextField4;
     private javax.swing.JTextField jTextField5;
     private javax.swing.JTextField jTextField6;
-    private javax.swing.JTextField jTextField7;
-    private javax.swing.JTextField jTextField8;
-    private javax.swing.JTextField jTextField9;
     private raven.tabbed.TabbedPaneCustom tabbedPaneCustom1;
     // End of variables declaration//GEN-END:variables
+
+   
 }

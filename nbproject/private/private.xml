@@ -3,12 +3,11 @@
     <editor-bookmarks xmlns="http://www.netbeans.org/ns/editor-bookmarks/2" lastBookmarkId="0"/>
     <open-files xmlns="http://www.netbeans.org/ns/projectui-open-files/2">
         <group>
-            <file>file:/C:/Users/Chen%20Zen/Documents/NetBeansProjects/Gym/src/gym/Gym.java</file>
-            <file>file:/C:/Users/Chen%20Zen/Documents/NetBeansProjects/Gym/src/gym/ProtocolSelection.java</file>
-            <file>file:/C:/Users/Chen%20Zen/Documents/NetBeansProjects/Gym/src/gym/Choixrole.java</file>
+            <file>file:/C:/Users/Chen%20Zen/Documents/NetBeansProjects/Gym/src/gym/Inscription.java</file>
             <file>file:/C:/Users/Chen%20Zen/Documents/NetBeansProjects/Gym/src/gym/LoginScreen.java</file>
-            <file>file:/C:/Users/Chen%20Zen/Documents/NetBeansProjects/Gym/src/gym/AcceuilClient.java</file>
             <file>file:/C:/Users/Chen%20Zen/Documents/NetBeansProjects/Gym/src/gym/AcceuilAdmini.java</file>
+            <file>file:/C:/Users/Chen%20Zen/Documents/NetBeansProjects/Gym/src/gym/ProtocolSelection.java</file>
+            <file>file:/C:/Users/Chen%20Zen/Documents/NetBeansProjects/Gym/src/Jdbc/Jdbc.java</file>
         </group>
     </open-files>
 </project-private>

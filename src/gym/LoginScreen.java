@@ -2,6 +2,9 @@ package gym;
 
 import javax.swing.*;
 import java.awt.event.*;
+import java.sql.*;
+import java.util.logging.Level;
+import java.util.logging.Logger;
 
 public class LoginScreen extends javax.swing.JFrame {
 
@@ -77,8 +80,8 @@ public class LoginScreen extends javax.swing.JFrame {
             public void actionPerformed(ActionEvent e) {
                 dispose();
                 Inscription in = new Inscription();
-               in.setVisible(true);
-               in.setLocationRelativeTo(null);
+                in.setVisible(true);
+                in.setLocationRelativeTo(null);
                 // new RegisterScreen().setVisible(true); // si tu veux ajouter une vraie classe
                 // dispose();
             }
@@ -94,32 +97,77 @@ public class LoginScreen extends javax.swing.JFrame {
             public void actionPerformed(ActionEvent e) {
                 String username = input_username.getText();
                 String password = String.valueOf(input_password.getPassword());
+                String selectedRole = role; // Assuming 'role' is a variable holding the selected role ("Administrateur" or "Client")
 
                 if (username.isEmpty() || password.isEmpty()) {
                     JOptionPane.showMessageDialog(null, "Veuillez remplir tous les champs.");
                     return;
                 }
 
-                // Simulation d'une authentification (à remplacer par un appel backend réel)
-                if (username.equals("admin") && password.equals("1234") && role.equalsIgnoreCase("Administrateur")) {
-                    JOptionPane.showMessageDialog(null, "Connexion administrateur réussie !");
-                    // new AdminDashboard().setVisible(true);
-                    dispose();
-                    AcceuilAdmini d2 = new AcceuilAdmini();
-                     d2.setVisible(true);
-                     d2.setLocationRelativeTo(null);
-                } else if (username.equals("client") && password.equals("1234") && role.equalsIgnoreCase("Client")) {
-                    JOptionPane.showMessageDialog(null, "Connexion client réussie !");
-                    dispose();
-                    AcceuilClient d1 = new AcceuilClient();
-                     d1.setVisible(true);
-                     d1.setLocationRelativeTo(null);
-                    
+                if (selectedRole.equalsIgnoreCase("Administrateur")) {
+                    // Authenticate as Administrator with hardcoded credentials
+                    if (username.equals("admin") && password.equals("admin123")) {
+                        JOptionPane.showMessageDialog(null, "Connexion administrateur réussie !");
+                        dispose();
+                        AcceuilAdmini d2 = new AcceuilAdmini();
+                        d2.setVisible(true);
+                        d2.setLocationRelativeTo(null);
+                    } else {
+                        JOptionPane.showMessageDialog(null, "Identifiants administrateur incorrects !");
+                    }
+                } else if (selectedRole.equalsIgnoreCase("Client")) {
+                    // Authenticate as Client
+                    if (authenticateClient(username, password)) {
+                        try {
+                            JOptionPane.showMessageDialog(null, "Connexion client réussie !");
+                            dispose();
+                            AcceuilClient d1 = new AcceuilClient(username);
+                            d1.setVisible(true);
+                            d1.setLocationRelativeTo(null);
+                        } catch (SQLException ex) {
+                            Logger.getLogger(LoginScreen.class.getName()).log(Level.SEVERE, null, ex);
+                        }
+                    } else {
+                        JOptionPane.showMessageDialog(null, "Identifiants client incorrects !");
+                    }
                 } else {
-                    JOptionPane.showMessageDialog(null, "Identifiants incorrects !");
+                    JOptionPane.showMessageDialog(null, "Rôle non reconnu !");
                 }
             }
         });
+    }
+
+    // Method to authenticate client against the database
+    private boolean authenticateClient(String username, String password) {
+        Connection conn = null;
+        PreparedStatement pstmt = null;
+        ResultSet rs = null;
+        boolean isAuthenticated = false;
+        String clientName = null; // Variable to store the client's name
+
+        try {
+            conn = DriverManager.getConnection("jdbc:mysql://localhost:3306/gym", "root", "votre_nouveau_mot_de_passe"); // Replace with your credentials
+            String sql = "SELECT * FROM client WHERE Email = ? AND `Mot de passe` = ?"; // Assuming 'Nom' is username
+            pstmt = conn.prepareStatement(sql);
+            pstmt.setString(1, username);
+            pstmt.setString(2, password); // VERY INSECURE - Password should be hashed in the database
+
+            rs = pstmt.executeQuery();
+
+            if (rs.next()) {
+                isAuthenticated = true;
+                clientName = rs.getString("Nom"); // Retrieve the client's name
+                // You might want to retrieve other client details here if needed
+            }
+        } catch (SQLException e) {
+            JOptionPane.showMessageDialog(null, "Erreur de connexion à la base de données: " + e.getMessage(), "Erreur", JOptionPane.ERROR_MESSAGE);
+            e.printStackTrace();
+        } finally {
+            try { if (rs != null) rs.close(); } catch (SQLException e) {}
+            try { if (pstmt != null) pstmt.close(); } catch (SQLException e) {}
+            try { if (conn != null) conn.close(); } catch (SQLException e) {}
+        }
+        return isAuthenticated;
     }
 
     public static void main(String args[]) {
